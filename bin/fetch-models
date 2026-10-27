@@ -1,0 +1,31 @@
+#!/bin/bash
+# fetch-models [LIST] [--llama TYPE]...: download files named in a user-supplied list into $RIG_MODELS (default ~/llm-rig/models).
+# LIST has one "URL DEST-FILENAME" pair per line; blank lines and lines starting with # are ignored. Default LIST: $RIG_MODEL_LIST
+# or ~/.config/llm-rig/models.list. Existing non-empty files are skipped; interrupted downloads resume.
+# --llama TYPE also fetches the latest llama.cpp Linux x64 release asset matching TYPE (cpu, vulkan, ...) as llama-TYPE.tar.gz.
+. "$(dirname "$(readlink -f "$0")")/rig-env"; rig_help "$@"
+list=${RIG_MODEL_LIST:-${XDG_CONFIG_HOME:-$HOME/.config}/llm-rig/models.list}; types=()
+while [ $# -gt 0 ]; do case $1 in --llama) types+=("$2"); shift 2;; *) list=$1; shift;; esac; done
+mkdir -p "$RIG_MODELS"; cd "$RIG_MODELS" || exit 1
+if [ -r "$list" ]; then
+  while read -r url dest; do
+    case $url in ''|'#'*) continue;; esac
+    [ -n "$dest" ] || dest=$(basename "$url")
+    [ -s "$dest" ] || nice -n 10 curl -fL -C - -o "$dest" "$url" || exit 1
+  done <"$list"
+elif [ ${#types[@]} -eq 0 ]; then
+  echo "no model list at $list (see models.list.example)" >&2; exit 2
+fi
+for t in "${types[@]}"; do
+  [ -s "llama-$t.tar.gz" ] && continue
+  u=$(curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases/latest | TYPE=$t python3 -c "
+import json, os, sys
+t = os.environ['TYPE']; other = ('vulkan', 'rocm', 'openvino', 'sycl', 'cuda')
+for a in json.load(sys.stdin)['assets']:
+    n = a['name']
+    if 'ubuntu' in n and n.endswith('x64.tar.gz') and (t in n or (t == 'cpu' and not any(k in n for k in other))):
+        print(a['browser_download_url']); break")
+  [ -n "$u" ] || { echo "no llama.cpp release asset for $t" >&2; exit 1; }
+  curl -fL -o "llama-$t.tar.gz" "$u"
+done
+echo done

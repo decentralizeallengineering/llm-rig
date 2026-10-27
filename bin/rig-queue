@@ -1,0 +1,76 @@
+#!/usr/bin/python3
+"""rig-queue [--once] [-h]: file-based work queue for a model running in a sandbox VM.
+A task is $RIG_HOME/queue/inbox/NAME.md. Lines 'FILES: /abs/path' are copied into the VM work dir first.
+The model replies with one JSON object per turn: {"tool":"shell|read|write|done",...}; every tool runs inside the VM over ssh.
+The result lands in queue/outbox/NAME.result.md, the step log in NAME.log, and the task moves to queue/done/.
+Loops forever unless --once is given; it uses no hosted tokens.
+Env: RIG_VM (VM IP, required), RIG_DRIVER (base URL, default http://$RIG_VM:8001), RIG_HOME (default ~/llm-rig),
+RIG_KEY (ssh key, default $RIG_HOME/key), RIG_USER (default rig), RIG_WORKDIR (default /opt/rig/work),
+RIG_MODEL_NAME (default local), RIG_STEPS (turns per task, default 10)."""
+import glob, json, os, re, shlex, shutil, subprocess as sp, sys, time, urllib.request
+
+if any(a in ("-h", "--help") for a in sys.argv[1:]):
+    print(__doc__); sys.exit(0)
+R = os.environ.get("RIG_HOME", os.path.expanduser("~/llm-rig"))
+IP = os.environ.get("RIG_VM") or sys.exit("RIG_VM (the VM IP address) is required")
+DRV = os.environ.get("RIG_DRIVER", f"http://{IP}:8001")
+KEY = os.environ.get("RIG_KEY", R + "/key"); USER = os.environ.get("RIG_USER", "rig")
+W = os.environ.get("RIG_WORKDIR", "/opt/rig/work"); MODEL = os.environ.get("RIG_MODEL_NAME", "local")
+STEPS = int(os.environ.get("RIG_STEPS", 10))
+SSH = ["ssh", "-i", KEY, "-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR", f"{USER}@{IP}"]
+for d in ("inbox", "outbox", "done"):
+    os.makedirs(f"{R}/queue/{d}", exist_ok=True)
+os.makedirs(R + "/work/vmwork", exist_ok=True)
+
+def vm(cmd, inp=None):
+    return sp.run(SSH + [f"mkdir -p {W} && cd {W} && {cmd}"], input=inp, capture_output=True, text=True, timeout=300)
+
+def llm(msgs):
+    b = json.dumps({"model": MODEL, "messages": msgs, "max_tokens": 1500, "temperature": 0.2}).encode()
+    req = urllib.request.Request(DRV + "/v1/chat/completions", b, {"Content-Type": "application/json"})
+    return json.load(urllib.request.urlopen(req, timeout=900))["choices"][0]["message"]["content"]
+
+SYS = ('You are a worker in a sandbox VM. Work dir is the cwd. Reply with exactly ONE JSON object per turn, nothing else: '
+       '{"tool":"shell","cmd":"..."} | {"tool":"read","path":"..."} | {"tool":"write","path":"...","content":"..."} | '
+       '{"tool":"done","result":"final answer in markdown"}.')
+
+def run(task):
+    name = os.path.basename(task)[:-3]; txt = open(task).read(); log = open(f"{R}/queue/outbox/{name}.log", "w")
+    files = re.findall(r"^FILES:\s*(\S+)", txt, re.M)
+    vm("true")
+    for f in files:
+        sp.run(["scp", "-q", "-i", KEY, "-o", "LogLevel=ERROR", f, f"{USER}@{IP}:{W}/"])
+    note = ("\nFiles copied into your cwd: " + ", ".join(os.path.basename(f) for f in files) + "\n") if files else ""
+    msgs = [{"role": "system", "content": SYS}, {"role": "user", "content": "TASK:\n" + re.sub(r"^FILES:.*$", "", txt, flags=re.M) + note}]
+    result = "(no result: step limit)"
+    for step in range(STEPS):
+        r = llm(msgs); log.write(f"--- step {step}\n{r}\n"); log.flush()
+        try:
+            a = json.loads(re.search(r"\{.*\}", r, re.S).group(0), strict=False)
+        except Exception:
+            if '"tool":"done"' in r.replace(' ', ''):
+                result = re.sub(r'^.*?"result"\s*:\s*"', '', r, 1, re.S).rstrip().rstrip('}').rstrip().rstrip('"').replace('\\n', '\n'); break
+            msgs += [{"role": "assistant", "content": r}, {"role": "user", "content": "Invalid. Reply with one JSON object."}]; continue
+        t = a.get("tool")
+        if t == "done":
+            result = a.get("result", ""); break
+        if t == "shell":
+            p = vm(a.get("cmd", "true")); out = (p.stdout + p.stderr)[-2500:]
+        elif t == "read":
+            p = vm("head -c 6000 " + shlex.quote(a.get("path", ""))); out = p.stdout + p.stderr
+        elif t == "write":
+            p = vm("cat > " + shlex.quote(a.get("path", "out.txt")), a.get("content", "")); out = "written" if p.returncode == 0 else p.stderr
+        else:
+            out = "unknown tool"
+        log.write(f"[out] {out[:500]}\n"); msgs += [{"role": "assistant", "content": r}, {"role": "user", "content": "OUTPUT:\n" + out}]
+    open(f"{R}/queue/outbox/{name}.result.md", "w").write(result + "\n"); shutil.move(task, f"{R}/queue/done/")
+    sp.run(["rsync", "-a", "-e", f"ssh -i {KEY} -o LogLevel=ERROR", f"{USER}@{IP}:{W}/", R + "/work/vmwork/"], capture_output=True)
+    print("done", name)
+
+once = "--once" in sys.argv
+while True:
+    for t in sorted(glob.glob(R + "/queue/inbox/*.md")):
+        run(t)
+    if once:
+        break
+    time.sleep(15)

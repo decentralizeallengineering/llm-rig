@@ -1,0 +1,33 @@
+#!/bin/bash
+# Shared helpers, sourced by the other rig-* scripts. Not run directly.
+# Configuration comes from a shell file (default ~/.config/llm-rig/rig.conf, see rig.conf.example).
+RIG_HOME=${RIG_HOME:-$HOME/llm-rig}
+RIG_CONF=${RIG_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/llm-rig/rig.conf}
+[ -r "$RIG_CONF" ] && . "$RIG_CONF"
+RIG_KEY=${RIG_KEY:-$RIG_HOME/key}
+RIG_USER=${RIG_USER:-rig}
+RIG_LIBVIRT=${RIG_LIBVIRT:-qemu:///system}
+RIG_NETWORK=${RIG_NETWORK:-default}
+RIG_MODELS=${RIG_MODELS:-$RIG_HOME/models}
+RIG_IMG=${RIG_IMG:-$RIG_HOME/img}
+RIG_BASE_IMAGE=${RIG_BASE_IMAGE:-$RIG_IMG/base.img}
+RIG_OS_VARIANT=${RIG_OS_VARIANT:-ubuntu24.04}
+RIG_NVIDIA_PKG=${RIG_NVIDIA_PKG:-nvidia-driver-580-server-open nvidia-utils-580-server}
+RIG_REMOTE=${RIG_REMOTE:-/opt/rig}
+V() { virsh -c "$RIG_LIBVIRT" "$@"; }
+SSHO=(-i "$RIG_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+# vmv NAME FIELD: value of the config variable <NAME>_<FIELD> (dashes in NAME become underscores).
+vmv() { local n=${1//-/_}_$2; echo "${!n}"; }
+# S NAME cmd...: run a command in the VM over ssh.   C SRC... NAME DEST: copy files into the VM.
+S() { local n=$1; shift; ssh "${SSHO[@]}" "$RIG_USER@$(vmv "$n" IP)" "$@"; }
+C() { local args=("$@") n; n=${args[-2]}; scp -q "${SSHO[@]}" "${args[@]:0:${#args[@]}-2}" "$RIG_USER@$(vmv "$n" IP):${args[-1]}"; }
+# rig_vms [NAME...]: print the named VMs, or all configured ones.
+rig_vms() {
+  if [ $# -gt 0 ]; then printf '%s\n' "$@"; return; fi
+  [ -n "${RIG_VMS:-}" ] || { echo "RIG_VMS is empty: create $RIG_CONF from rig.conf.example" >&2; exit 2; }
+  printf '%s\n' $RIG_VMS
+}
+# rig_help "$@": print the calling script's leading comment block for -h/--help.
+rig_help() {
+  case "${1:-}" in -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"; exit 0;; esac
+}

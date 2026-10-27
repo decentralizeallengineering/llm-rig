@@ -1,0 +1,12 @@
+key
+key.pub
+*.qcow2
+*.gguf
+*.tar.gz
+img/
+models/
+queue/
+work/
+rig.conf
+models.list
+__pycache__/

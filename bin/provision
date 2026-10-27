@@ -1,0 +1,45 @@
+#!/bin/bash
+# provision [VM...]: push model files and the llama.cpp build into each VM and install its systemd service.
+# Idempotent; called by rig-up. Files named in <vm>_FILES and llama-<BACKEND>.tar.gz must already be in $RIG_MODELS
+# (see fetch-models). For BACKEND=cuda the NVIDIA driver packages are installed on first run (one reboot).
+. "$(dirname "$(readlink -f "$0")")/rig-env"; rig_help "$@"
+R=$RIG_REMOTE; HERE=$(dirname "$(readlink -f "$0")")
+put() {   # put VM FILE: copy $RIG_MODELS/FILE to $R/FILE unless already present
+  S "$1" "test -s $R/$2" 2>/dev/null && return 0
+  [ -s "$RIG_MODELS/$2" ] || { echo "missing $RIG_MODELS/$2 (run fetch-models)"; exit 1; }
+  C "$RIG_MODELS/$2" "$1" "$R/$2"
+}
+for n in $(rig_vms "$@"); do
+  backend=$(vmv "$n" BACKEND); backend=${backend:-cpu}; port=$(vmv "$n" PORT); port=${port:-8001}
+  S "$n" "sudo mkdir -p $R && sudo chown $RIG_USER $R"
+  if [ "$backend" = cuda ]; then
+    S "$n" "test -f $R/.drv || (sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $RIG_NVIDIA_PKG >/dev/null && sudo touch $R/.drv; echo needreboot)" | grep -q needreboot && {
+      S "$n" "sudo reboot"; sleep 60; until S "$n" true 2>/dev/null; do sleep 5; done; }
+  fi
+  for f in $(vmv "$n" FILES) "llama-$backend.tar.gz"; do put "$n" "$f"; done
+  S "$n" "test -x $R/llama/llama-server || (mkdir -p $R/llama && tar xzf $R/llama-$backend.tar.gz -C $R/llama --strip-components=1)"
+  if [ -s "$RIG_MODELS/cudart.tar.gz" ]; then   # optional CUDA runtime bundle, unpacked over the build
+    put "$n" cudart.tar.gz; S "$n" "tar xzf $R/cudart.tar.gz -C $R/llama --strip-components=1 2>/dev/null; true"
+  fi
+  S "$n" "ldconfig -p | grep -q libgomp || (sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libgomp1 >/dev/null)"
+  pre=""
+  if [ "$backend" = cuda ]; then C "$HERE/../vm/gpuwait.sh" "$n" "$R/gpuwait.sh"; S "$n" "chmod +x $R/gpuwait.sh"; pre="ExecStartPre=$R/gpuwait.sh"; fi
+  cmd=$(vmv "$n" CMD)
+  [ -n "$cmd" ] || { echo "${n}_CMD (the llama-server command line) is not set"; exit 1; }
+  unit=$(mktemp)
+  cat >"$unit" <<U
+[Unit]
+After=network.target
+[Service]
+User=$RIG_USER
+Environment=LD_LIBRARY_PATH=$R/llama
+$pre
+ExecStart=$cmd
+Restart=always
+[Install]
+WantedBy=multi-user.target
+U
+  C "$unit" "$n" /tmp/rig-llm.service; rm -f "$unit"
+  S "$n" "sudo install -m 644 /tmp/rig-llm.service /etc/systemd/system/rig-llm.service && sudo systemctl daemon-reload && sudo systemctl enable rig-llm && sudo systemctl restart rig-llm"
+  echo "provisioned $n (port $port)"
+done

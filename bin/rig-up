@@ -1,0 +1,55 @@
+#!/bin/bash
+# rig-up [VM...]: create (first run) or start the configured VMs, wait for ssh, then run provision.
+# Idempotent. With no arguments every VM in RIG_VMS is handled.
+. "$(dirname "$(readlink -f "$0")")/rig-env"; rig_help "$@"
+mk() {
+  local n=$1 d=$RIG_IMG/$1 ip cpus ram disk pin hostdev args=() i=0 cpu part a b
+  $V dominfo "$n" >/dev/null 2>&1 && return 0
+  ip=$(vmv "$n" IP); cpus=$(vmv "$n" CPUS); ram=$(vmv "$n" RAM_GB); disk=$(vmv "$n" DISK_GB)
+  pin=$(vmv "$n" PIN); hostdev=$(vmv "$n" HOSTDEV)
+  [ -r "$RIG_BASE_IMAGE" ] || { echo "base image $RIG_BASE_IMAGE missing (a cloud image with cloud-init)"; exit 1; }
+  mkdir -p "$d"; qemu-img create -q -f qcow2 -F qcow2 -b "$RIG_BASE_IMAGE" "$d/disk.qcow2" "${disk:-30}G"
+  cat >"$d/user-data" <<U
+#cloud-config
+hostname: $n
+users: [{name: $RIG_USER, sudo: 'ALL=(ALL) NOPASSWD:ALL', shell: /bin/bash, ssh_authorized_keys: ["$(cat "$RIG_KEY.pub")"]}]
+ssh_pwauth: false
+U
+  cat >"$d/network-config" <<U
+version: 2
+ethernets: {e: {match: {name: "en*"}, addresses: [$ip/${RIG_PREFIX:-24}], routes: [{to: default, via: $RIG_GATEWAY}], nameservers: {addresses: [$RIG_GATEWAY]}}}
+U
+  echo "instance-id: $n" >"$d/meta-data"
+  genisoimage -quiet -output "$d/seed.iso" -volid cidata -joliet -rock "$d/user-data" "$d/meta-data" "$d/network-config"
+  setfacl -m u:libvirt-qemu:rx "$d"; setfacl -m u:libvirt-qemu:rw "$d/disk.qcow2"; setfacl -m u:libvirt-qemu:r "$d/seed.iso"
+  # PIN is a host cpuset such as "20-29" or "2,3,8-9": vCPU i is pinned to the i-th host CPU in it.
+  if [ -n "$pin" ]; then
+    local list=() cs=""
+    for part in ${pin//,/ }; do a=${part%-*}; b=${part#*-}; for ((cpu=a; cpu<=b; cpu++)); do list+=("$cpu"); done; done
+    for ((i=0; i<${#list[@]} && i<cpus; i++)); do cs+="${cs:+,}vcpupin$i.vcpu=$i,vcpupin$i.cpuset=${list[i]}"; done
+    args+=(--cputune "$cs")
+  fi
+  for a in $hostdev; do args+=(--host-device "$a"); done
+  virt-install --connect "$RIG_LIBVIRT" --name "$n" --vcpus "$cpus" --memory $((ram * 1024)) --cpu host-passthrough --machine q35 \
+    --disk "$d/disk.qcow2" --disk "$d/seed.iso,device=cdrom" --network "network=$RIG_NETWORK,model=virtio" --os-variant "$RIG_OS_VARIANT" \
+    --import --noautoconsole --graphics none "${args[@]}" || exit 1
+}
+# Nothing may hold a GPU when libvirt detaches it, or libvirtd can hang in the kernel. GPU_PCI (host address such as
+# 0000:01:00.0) enables the check; RIG_GPU_HOLDERS lists process names (for example a lighting daemon) to stop first.
+check_gpu() {
+  local n=$1 pci f minor p
+  pci=$(vmv "$n" GPU_PCI); [ -n "$pci" ] || return 0
+  f=/proc/driver/nvidia/gpus/$pci/information; [ -r "$f" ] || return 0   # already bound to vfio
+  minor=$(awk '/Device Minor/{print $NF}' "$f")
+  for p in ${RIG_GPU_HOLDERS:-}; do pkill -f "$p" || true; done; sleep 3
+  for p in /proc/[0-9]*; do
+    ls -l "$p/fd" 2>/dev/null | grep -q "/dev/nvidia$minor$" && { echo "GPU $pci still held by pid ${p#/proc/}; abort"; exit 1; }
+  done
+  return 0
+}
+VMS=$(rig_vms "$@")
+for n in $VMS; do check_gpu "$n"; mk "$n"; done
+for n in $VMS; do $V domstate "$n" | grep -q running || $V start "$n"; done
+for n in $VMS; do for _ in $(seq 90); do S "$n" true 2>/dev/null && break; sleep 5; done; done
+"$(dirname "$(readlink -f "$0")")/provision" $VMS
+echo up

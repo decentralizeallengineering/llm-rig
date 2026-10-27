@@ -1,0 +1,15 @@
+#!/usr/bin/python3
+"""qask [-h] QUESTION...: one-shot question to a local OpenAI-compatible model server.
+Reads stdin when no question is given. Env: RIG_DRIVER (base URL, default http://127.0.0.1:8001),
+RIG_MODEL_NAME (default "local"), N (max tokens, default 800)."""
+import json, os, sys, urllib.request
+
+if any(a in ("-h", "--help") for a in sys.argv[1:]):
+    print(__doc__); sys.exit(0)
+u = os.environ.get("RIG_DRIVER", "http://127.0.0.1:8001")
+prompt = " ".join(sys.argv[1:]) or sys.stdin.read()
+body = json.dumps({"model": os.environ.get("RIG_MODEL_NAME", "local"),
+                   "messages": [{"role": "user", "content": prompt}],
+                   "max_tokens": int(os.environ.get("N", 800))}).encode()
+req = urllib.request.Request(u + "/v1/chat/completions", body, {"Content-Type": "application/json"})
+print(json.load(urllib.request.urlopen(req, timeout=900))["choices"][0]["message"]["content"])

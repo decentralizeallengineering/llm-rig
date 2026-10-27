@@ -1,0 +1,4 @@
+#!/bin/bash
+# rig-down [VM...]: ask the configured VMs to shut down (default: all in RIG_VMS).
+. "$(dirname "$(readlink -f "$0")")/rig-env"; rig_help "$@"
+for n in $(rig_vms "$@"); do timeout 30 virsh -c "$RIG_LIBVIRT" shutdown "$n" 2>/dev/null; done; echo down

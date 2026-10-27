@@ -1,0 +1,39 @@
+# llm-rig configuration. Copy to ~/.config/llm-rig/rig.conf (or point RIG_CONF at it) and edit.
+# The addresses below are documentation-range placeholders: use addresses on your libvirt network.
+
+RIG_HOME=$HOME/llm-rig          # holds key, key.pub (ssh), img/ (base image, disks), models/
+RIG_BASE_IMAGE=$RIG_HOME/img/base.img   # Ubuntu-style cloud image with cloud-init
+RIG_GATEWAY=203.0.113.1         # libvirt network gateway, used as default route and DNS in the guests
+RIG_PREFIX=24
+RIG_NETWORK=default             # libvirt network name
+# RIG_GPU_HOLDERS="some-rgb-daemon"   # process names to stop before a GPU is detached from the host
+
+# VM names: letters, digits, underscore. Each VM has these fields (prefix NAME_):
+#   IP, CPUS, RAM_GB, DISK_GB          guest sizing and static address
+#   PIN       optional host cpuset for vCPU pinning, for example "20-29"
+#   HOSTDEV   optional libvirt node devices to pass through, for example "pci_0000_01_00_0 pci_0000_01_00_1"
+#   GPU_PCI   optional host PCI address of the GPU, enables the "nothing holds the GPU" check, for example 0000:01:00.0
+#   BACKEND   cpu, vulkan or cuda: selects llama-BACKEND.tar.gz in $RIG_MODELS (cuda also installs NVIDIA packages)
+#   FILES     files from $RIG_MODELS to copy into the guest
+#   PORT      port of the model server, default 8001 (used by rig-status)
+#   CMD       full llama-server command line; files live in /opt/rig, the build in /opt/rig/llama
+RIG_VMS="gpu0 cpu0"
+
+gpu0_IP=203.0.113.50
+gpu0_CPUS=12
+gpu0_RAM_GB=30
+gpu0_DISK_GB=90
+gpu0_HOSTDEV="pci_0000_01_00_0 pci_0000_01_00_1"
+gpu0_GPU_PCI=0000:01:00.0
+gpu0_BACKEND=cuda
+gpu0_FILES="model.gguf"
+gpu0_CMD="/opt/rig/llama/llama-server -m /opt/rig/model.gguf -ngl 99 -c 16384 --host 0.0.0.0 --port 8001 --jinja"
+
+cpu0_IP=203.0.113.51
+cpu0_CPUS=10
+cpu0_RAM_GB=8
+cpu0_DISK_GB=30
+cpu0_PIN="20-29"
+cpu0_BACKEND=cpu
+cpu0_FILES="small.gguf"
+cpu0_CMD="/opt/rig/llama/llama-server -m /opt/rig/small.gguf -t 10 -c 8192 --host 0.0.0.0 --port 8001 --jinja"

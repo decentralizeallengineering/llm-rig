@@ -1,0 +1,8 @@
+#!/bin/bash
+# rig-status: HTTP status of each VM's model endpoint (/v1/models) plus the libvirt domain list.
+. "$(dirname "$(readlink -f "$0")")/rig-env"; rig_help "$@"
+for n in $(rig_vms); do
+  ip=$(vmv "$n" IP); port=$(vmv "$n" PORT); port=${port:-8001}
+  printf '%-20s %s:%s ' "$n" "$ip" "$port"; curl -s -m 3 -o /dev/null -w '%{http_code}\n' "http://$ip:$port/v1/models" || echo down
+done
+timeout 8 virsh -c "$RIG_LIBVIRT" list --all 2>&1 | tail -n +1

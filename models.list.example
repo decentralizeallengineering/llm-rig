@@ -1,0 +1,3 @@
+# fetch-models list: "URL DEST-FILENAME" per line. You choose the models; none are bundled.
+https://example.invalid/path/to/model.gguf model.gguf
+https://example.invalid/path/to/small.gguf small.gguf
