@@ -1,5 +1,7 @@
 # llm-rig
 
+[![tests](https://github.com/decentralizeallengineering/llm-rig/actions/workflows/tests.yml/badge.svg)](https://github.com/decentralizeallengineering/llm-rig/actions/workflows/tests.yml) ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
+
 Shell and Python tools for running local LLM servers inside libvirt VMs, optionally with a GPU passed through.
 Keeping the model server in a VM isolates drivers and weights from the host, lets you pin CPUs, and makes a rig easy to rebuild.
 
